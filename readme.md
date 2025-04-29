@@ -9,7 +9,6 @@ Current example:
 - Compiles data retreieved into pandas `dataframe`
 - Data compiled will be each record my my gym classes in `outpostclimbing`
 
-
 ## Quickstart
 
 1. Make sure you have already started a new project on Google Cloud Console `https://console.cloud.google.com/`
@@ -18,3 +17,16 @@ Current example:
 1. Load the credentials file to `/gmail-reader/grrd/secrets/client_secret_123241-asdadae.apps.googleusercontent.com`
 1. Run `python cli.py`
 
+## Folder directory
+
+```text
+./
+├── ggrd/
+│   ├── __init__.py
+│   ├── gmail.py
+│   └── apple_invoice.py
+├── cli.py
+├── readme.md
+├── .gitignore
+└── requirements.txt
+```
