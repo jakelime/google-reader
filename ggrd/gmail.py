@@ -5,15 +5,167 @@ import tempfile
 from typing import Optional
 
 import pandas as pd
+from bs4 import BeautifulSoup, Tag
+from bs4.element import NavigableString
 
-try:
-    from auth import GoogleAuthManager
-    from utils import CustomLogger
-except ImportError:
-    from ggrd.auth import GoogleAuthManager
-    from ggrd.utils import CustomLogger
+from ggrd.auth import GoogleAuthManager
+from ggrd.common_vars import APP_NAME
+from ggrd.utils import CustomLogger
 
-APP_NAME = "ggrd"
+lg = CustomLogger(APP_NAME).getLogger()
+
+DEBUG_LIMIT = 1
+
+import re
+
+
+def clean_html_newline_chars(html_content):
+    """
+    Removes extraneous \r\n characters from HTML content.
+
+    Args:
+      html_content: A string containing the HTML content with \r\n.
+
+    Returns:
+      A cleaned string with \r\n characters removed.
+    """
+    # Replace all occurrences of \r\n with an empty string
+    cleaned_html = html_content.replace("\r\n", "")
+    # You might also want to remove leading/trailing whitespace from lines
+    # or collapse multiple spaces, but removing \r\n is the primary request.
+    # For example, to remove leading/trailing whitespace from each line:
+    # cleaned_html = "\n".join([line.strip() for line in cleaned_html.splitlines()])
+    return cleaned_html
+
+
+class HtmlCleaner:
+    def __init__(self, html_content: str):
+        soup = BeautifulSoup(html_content, "html.parser")
+        data = {}
+        # apple_account
+        data["apple_account"] = self.find_text_after_label(soup, "APPLE ACCOUNT")
+
+        # invoice_date
+        data["invoice_date"] = self.find_text_after_label(soup, "INVOICE DATE")
+
+        # sequence_no
+        data["sequence_no"] = self.find_text_after_label(soup, "SEQUENCE NO.")
+
+        # billed_to
+        data["billed_to"] = self.find_text_after_label(soup, "BILLED TO")
+
+        # order_id
+        data["order_id"] = self.find_text_after_label(soup, "ORDER ID")
+
+        # document_no
+        data["document_no"] = self.find_text_after_label(soup, "DOCUMENT NO.")
+
+        # price (Targeting the TOTAL row)
+        total_label_td = soup.find("td", string="TOTAL")
+        if total_label_td:
+            price_td = total_label_td.find_next_sibling("td").find_next_sibling("td")
+            data["price"] = self.get_cleaned_text(price_td)
+        else:
+            # Fallback: find the last price-like span if TOTAL isn't found
+            price_spans = soup.find_all("span", string=re.compile(r"S\$\s*\d+\.\d+"))
+            if price_spans:
+                data["price"] = self.get_cleaned_text(
+                    price_spans[-1]
+                )  # Assume last one is total
+            else:
+                data["price"] = None
+
+        # item (Combining multiple fields)
+        item_cell = soup.find("td", class_="item-cell")
+        item_parts = []
+        if item_cell:
+            title = item_cell.find("span", class_="title")
+            artist = item_cell.find("span", class_="artist")
+            item_type = item_cell.find("span", class_="type")
+            device = item_cell.find("span", class_="device")
+
+            if title:
+                item_parts.append(self.get_cleaned_text(title))
+            if artist:
+                item_parts.append(self.get_cleaned_text(artist))
+            if item_type:
+                item_parts.append(self.get_cleaned_text(item_type))
+            if device:
+                item_parts.append(self.get_cleaned_text(device))
+
+        data["item"] = (
+            " ".join(part for part in item_parts if part) if item_parts else None
+        )
+
+        # --- Print Results ---
+        for key, value in data.items():
+            print(f"{key}: {value}")
+
+        # --- Verification against user request ---
+        print("\n--- Verification ---")
+        print(
+            f"Requested price match: {data.get('price') == 'S$ 6.98'}"
+        )  # Note space after S$ due to \xa0 replacement
+        # Adjust expected item string to match cleaning (space instead of \xa0)
+        expected_item = "Genshin Impact Blessings Bundle In-App Purchase JakePhoneH"
+        print(f"Requested item match: {data.get('item') == expected_item}")
+
+    def get_cleaned_text(self, element):
+        if element:
+            # Replace non-breaking space \xa0 with regular space
+            return element.text.replace("\xa0", " ").strip()
+        return None
+
+    def find_text_after_label(self, soup, label_text):
+        label_span = soup.find("span", string=lambda t: t and label_text in t)
+        if not label_span:
+            return None
+        parent_td = label_span.find_parent("td")
+        if not parent_td:
+            return None
+
+        # Find the text node directly following the <br> tag after the label span
+        found_br = False
+        text_content = []
+        for content in label_span.next_siblings:
+            if isinstance(content, Tag) and content.name == "br":
+                found_br = True
+                continue
+            # Handle the specific case for Order ID where text is inside a nested span/link
+            if (
+                label_text == "ORDER ID"
+                and isinstance(content, Tag)
+                and content.find("a")
+            ):
+                link = content.find("a")
+                if link:
+                    return self.get_cleaned_text(link)
+            # Handle the specific case for Invoice Date where text is inside a nested span
+            if (
+                label_text == "INVOICE DATE"
+                and isinstance(content, Tag)
+                and content.name == "span"
+            ):
+                return self.get_cleaned_text(content)
+            # Handle Billed To multi-line text
+            if label_text == "BILLED TO":
+                if isinstance(content, NavigableString):
+                    line = content.strip().replace("\xa0", " ")
+                    if line:
+                        text_content.append(line)
+                elif isinstance(content, Tag) and content.name == "br":
+                    continue  # Keep lines separate for potential joining later
+            # General case for other text nodes
+            elif found_br and isinstance(content, NavigableString):
+                cleaned_text = content.strip().replace("\xa0", " ")
+                if cleaned_text:
+                    return cleaned_text  # Return the first non-empty text node found after <br>
+
+        if label_text == "BILLED TO" and text_content:
+            return " ".join(text_content)  # Join Billed To lines with spaces
+
+        # Fallback if specific logic didn't return
+        return None
 
 
 @dataclasses.dataclass
@@ -33,11 +185,10 @@ class EmailContent:
 
 class EmailClient:
     def __init__(self):
-        self.lg = CustomLogger(name=APP_NAME).getLogger()
         self.emails = []
         self.gga = GoogleAuthManager()
         self.service = self.gga.get_gmail_service()
-        self.lg.info("gmail service loaded")
+        lg.info("gmail service loaded")
 
     def get_messages(
         self,
@@ -77,7 +228,7 @@ class EmailClient:
                         break
 
         except Exception as error:
-            self.lg.error(f"An error occurred: {error}", exc_info=True)
+            lg.error(f"An error occurred: {error}", exc_info=True)
 
     def get_message(self, message_id, user_id="me") -> EmailContent:
         msg = (
@@ -92,35 +243,9 @@ class EmailClient:
             (header["value"] for header in headers if header["name"] == "From"),
             "No Sender",
         )
+        lg.info(f"{msg=}")
 
-        # Get the content of the email
-        decoded_body = None
-        # payload = msg["payload"]
-        # [print(f"{k=}") for k,v in payload.items()]
-        # parts = payload["parts"]
-        # [print(f"{p.keys()}") for p in parts]
-        # part =
-        # body =
-        # body = base64.urlsafe_b64decode(parts[1]["body"]["data"]).decode("utf-8")
-        # print(f"{decoded_body=}")
-
-        if "parts" in payload:
-            for part in payload["parts"]:
-                if part["mimeType"] == "text/plain":
-                    body = part["body"]["data"]
-                    decoded_body = base64.urlsafe_b64decode(body).decode("utf-8")
-                    # print(f"{decoded_body}")
-                    # raise NotImplementedError("Not implemented - email in text")
-                    break  # Stop after finding the first text/plain part
-        else:
-            # If the email has no parts, assume it is plaintext
-            body = payload["body"]["data"]
-            decoded_body = base64.urlsafe_b64decode(body).decode("utf-8")
-
-        # body = decoded_body if decoded_body is not None else "No Body"
-        # raise Exception("STOP HERE")
-
-        return EmailContent(sender=sender, subject=subject, body_text=body)
+        return EmailContent(sender=sender, subject=subject, body_text="helloworld")
 
     def run(self, before_date: Optional[str] = None, after_date: Optional[str] = None):
         # Get and print the messages in the user's inbox
@@ -128,91 +253,21 @@ class EmailClient:
 
     def logout(self):
         os.remove(self.service.token)
-        self.lg.info("logout successful")
-
-
-class OutpostEmailClient(EmailClient):
-    def __init__(self):
-        super().__init__()
-        self.kws = {
-            "Date & time": "datetime",
-            "Booking ref": "booking_ref",
-            "Membership No": "membership_no",
-            "Membership": "membership_name",
-            "Class": "class_name",
-            "Location": "location",
-        }
-
-    def run(self, after_date: Optional[str] = None) -> pd.DataFrame:
-        # Get and print the messages in the user's inbox
-        self.get_messages(
-            sender_email="no-reply@outpostclimbing.rezeve.com",
-            after_date=after_date,
-            subject="Booking confirmed:",
-            limit=0,
-        )
-        df = self.consolidate_all_emails()
-        return df
-
-    def print_emails(self) -> None:
-        for email in self.emails:
-            print(email.df)
-
-    def parse_html(self, html_str: str) -> pd.DataFrame:
-        dfs = [None]
-        with tempfile.NamedTemporaryFile(delete=True) as fp:
-            with open(fp.name, "w") as fwriter:
-                fwriter.write(html_str)
-            dfs = pd.read_html(fp)  # type: ignore
-        for df in dfs:
-            dff = df[df[0].isin(self.kws)]
-            if len(dff) < len(self.kws):
-                continue
-            else:
-                df = dff.copy()
-                df[0] = df[0].replace(self.kws)
-                df.set_index(0, inplace=True)
-                df = df.T
-                df["datetime"] = pd.to_datetime(
-                    df["datetime"], format="%d %b %Y @ %H:%M %p", errors="raise"
-                )
-                return df
-        return pd.DataFrame()
-
-    def get_message(self, message_id, user_id="me") -> EmailContent:
-        e = super().get_message(message_id, user_id)
-        df = self.parse_html(e.body_text)
-        return EmailContent(
-            sender=e.sender, subject=e.subject, body_text=e.body_text, df=df
-        )
-
-    def consolidate_all_emails(self) -> pd.DataFrame:
-        df = pd.concat([email.df for email in self.emails])
-        df.sort_values(by="datetime", inplace=True, ascending=True)
-        df.reset_index(drop=True, inplace=True)
-        df = df[self.kws.values()]
-        return df
+        lg.info("logout successful")
 
 
 class AppleEmailClient(EmailClient):
     def __init__(self):
         super().__init__()
-        self.kws = {}
 
-    def run(self, after_date: Optional[str] = None) -> pd.DataFrame:
+    def run(self, after_date: Optional[str] = None):
         # Get and print the messages in the user's inbox
         self.get_messages(
             sender_email="no_reply@email.apple.com",
             after_date=after_date,
             subject='"Your invoice from Apple."',
-            limit=0,
+            limit=DEBUG_LIMIT,
         )
-        df = self.consolidate_all_emails()
-        # return df
-
-    def print_emails(self) -> None:
-        for email in self.emails:
-            print(email.df)
 
     def parse_html(self, html_str: str) -> pd.DataFrame:
         ## The HTML is too complicated and without any ID to extract
@@ -243,6 +298,25 @@ class AppleEmailClient(EmailClient):
         #         return df
         # return pd.DataFrame()
 
+    def parse_parts(self, parts):
+        """Recursively parse message parts to find the body."""
+        for part in parts:
+            mime_type = part.get("mimeType")
+            body = part.get("body")
+            if mime_type == "text/plain" and body and "data" in body:
+                # Found the plain text body
+                return base64.urlsafe_b64decode(body["data"]).decode("utf-8")
+            elif mime_type == "text/html" and body and "data" in body:
+                # Found the HTML body - you might prefer this depending on your needs
+                # If you want both, you'd store them and decide later
+                return base64.urlsafe_b64decode(body["data"]).decode("utf-8")
+            elif "parts" in part:
+                # This part has nested parts, recurse into them
+                nested_body = self.parse_parts(part["parts"])
+                if nested_body:
+                    return nested_body
+        return None
+
     def get_message(self, message_id, user_id="me") -> EmailContent:
         # e = super().get_message(message_id, user_id)
         msg = (
@@ -262,23 +336,17 @@ class AppleEmailClient(EmailClient):
         decoded_body = None
         payload = msg["payload"]
 
-        if "parts" in payload:
-            for part in payload["parts"]:
-                if part["mimeType"] == "text/plain":
-                    body = part["body"]["data"]
-                    decoded_body = base64.urlsafe_b64decode(body).decode("utf-8")
-                    break  # Stop after finding the first text/plain part
-        else:
-            raise Exception("No text/plain parts found in email payload")
+        payload = msg["payload"]
+        parts = payload.get("parts", None)
 
-        body = decoded_body if decoded_body is not None else "No Body"
-        e = EmailContent(sender=sender, subject=subject, body_text=body)
-        df = self.parse_text(e.body_text)
-        print(df)
-        raise Exception("STOP HERE")
-        # Figure out why "Email subject INVOICE and RECEIPT requires different functions"
+        if parts:
+            res_parts = self.parse_parts(parts)
+            res_parts = clean_html_newline_chars(res_parts)
+            HtmlCleaner(res_parts)
+            # lg.info(f"{res_parts=}")
+
         return EmailContent(
-            sender=e.sender, subject=e.subject, body_text=e.body_text, df=df
+            sender=sender, subject=subject, body_text="helloworld2", df=pd.DataFrame()
         )
 
     def parse_text(self, txt: str) -> pd.DataFrame:
@@ -345,15 +413,6 @@ class AppleEmailClient(EmailClient):
         finally:
             df = pd.DataFrame(data, index=[0])
             return df
-
-    def consolidate_all_emails(self) -> pd.DataFrame:
-        df = pd.concat([email.df for email in self.emails])
-        # df.sort_values(by="datetime", inplace=True, ascending=True)
-        # df.reset_index(drop=True, inplace=True)
-        # df.to_csv("helloworld.csv")
-        print(df)
-        # df = df[self.kws.values()]
-        return df
 
 
 def main():
