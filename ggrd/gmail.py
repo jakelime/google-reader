@@ -10,10 +10,9 @@ from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
 
 from ggrd.auth import GoogleAuthManager
-from ggrd.common_vars import APP_NAME
-from ggrd.utils import CustomLogger
+from ggrd.custom_logger import getLogger
 
-lg = CustomLogger(APP_NAME).getLogger()
+lg = getLogger()
 
 DEBUG_LIMIT = 1
 
@@ -41,73 +40,31 @@ class HtmlCleaner:
     def __init__(self, html_content: str):
         soup = BeautifulSoup(html_content, "html.parser")
         data = {}
-        # apple_account
         data["apple_account"] = self.find_text_after_label(soup, "APPLE\xa0ACCOUNT")
-
-        # invoice_date
         data["invoice_date"] = self.find_text_after_label(soup, "INVOICE DATE")
-
-        # sequence_no
         data["sequence_no"] = self.find_text_after_label(soup, "SEQUENCE NO.")
-
-        # billed_to
         data["billed_to"] = self.find_text_after_label(soup, "BILLED TO")
-
-        # order_id
         data["order_id"] = self.find_text_after_label(soup, "ORDER ID")
-
-        # document_no
         data["document_no"] = self.find_text_after_label(soup, "DOCUMENT NO.")
 
         # price (Targeting the TOTAL row)
         total_label_td = soup.find("td", string="TOTAL")
+        print(f"{total_label_td=}")
         if total_label_td:
             price_td = total_label_td.find_next_sibling("td").find_next_sibling("td")
+            print(f"{price_td=}")
             data["price"] = self.get_cleaned_text(price_td)
         else:
             # Fallback: find the last price-like span if TOTAL isn't found
             price_spans = soup.find_all("span", string=re.compile(r"S\$\s*\d+\.\d+"))
             if price_spans:
-                data["price"] = self.get_cleaned_text(
-                    price_spans[-1]
-                )  # Assume last one is total
+                # Assume last one is total
+                data["price"] = self.get_cleaned_text(price_spans[-1])
             else:
                 data["price"] = None
 
-        # item (Combining multiple fields)
-        item_cell = soup.find("td", class_="item-cell")
-        item_parts = []
-        if item_cell:
-            title = item_cell.find("span", class_="title")
-            artist = item_cell.find("span", class_="artist")
-            item_type = item_cell.find("span", class_="type")
-            device = item_cell.find("span", class_="device")
-
-            if title:
-                item_parts.append(self.get_cleaned_text(title))
-            if artist:
-                item_parts.append(self.get_cleaned_text(artist))
-            if item_type:
-                item_parts.append(self.get_cleaned_text(item_type))
-            if device:
-                item_parts.append(self.get_cleaned_text(device))
-
-        data["item"] = (
-            " ".join(part for part in item_parts if part) if item_parts else None
-        )
-
-        # --- Print Results ---
         for key, value in data.items():
             print(f"{key}: {value}")
-
-        # --- Verification against user request ---
-        print("\n--- Verification ---")
-        print(
-            f"Requested price match: {data.get('price') == 'S$ 6.98'}"
-        )  # Note space after S$ due to \xa0 replacement
-        # Adjust expected item string to match cleaning (space instead of \xa0)
-        expected_item = "Genshin Impact Blessings Bundle In-App Purchase JakePhoneH"
-        print(f"Requested item match: {data.get('item') == expected_item}")
 
     def get_cleaned_text(self, element):
         if element:
@@ -235,7 +192,7 @@ class HtmlCleaner:
                         )
                     return cleaned_text
                 elif is_debug_target:
-                    print(f"      --> Text node was empty after strip.")
+                    print("      --> Text node was empty after strip.")
             elif is_debug_target:
                 # Print why the general case didn't match for this sibling
                 print(
@@ -500,18 +457,8 @@ class AppleEmailClient(EmailClient):
 
 
 def main():
-    # ec = EmailClient()
     ap = AppleEmailClient()
     ap.run()
-    # ap.get_messages(
-    # sender_email="no_reply@email.apple.com",
-    # after_date=after_date,
-    # subject="Booking confirmed:",
-    # limit=1,
-    # )
-    # op = OutpostEmailClient()
-    # df = op.run(after_date="2023-12-01")
-    # print(df)
 
 
 if __name__ == "__main__":
