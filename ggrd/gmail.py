@@ -1,14 +1,19 @@
 import base64
+import copy
 import dataclasses
 import datetime
+import email
 import email.utils
 import os
 import re
-from typing import Optional
+from typing import Any, Optional
 
+import dotenv
 import pandas as pd
 from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
 
 from ggrd.auth import GoogleAuthManager
 from ggrd.custom_logger import getLogger
@@ -16,6 +21,35 @@ from ggrd.custom_logger import getLogger
 lg = getLogger()
 # pd.set_option("display.max_columns", None)
 # pd.set_option("display.max_rows", None)
+
+
+dotenv.load_dotenv()
+
+
+def get_utc_timestamp_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+class Config:
+    MONGO_HOST: str = os.getenv("MONGO_HOST", "localhost")
+    MONGO_PORT: str = os.getenv("MONGO_PORT", "27017")
+    MONGO_USERNAME: str = os.getenv("MONGO_USERNAME", "root")
+    MONGO_PASSWORD: str = os.getenv("MONGO_PASSWORD", "root")
+    MONGO_CONNECTION_STRING: Optional[str] = os.getenv("MONGO_CONNECTION_STRING", None)
+
+    def __init__(self):
+        self.init_databases()
+
+    def init_databases(self):
+        self.init_mongo_connection_string()
+
+    def init_mongo_connection_string(self):
+        if not self.MONGO_CONNECTION_STRING:
+            self.MONGO_CONNECTION_STRING = f"mongodb://{self.MONGO_USERNAME}:{self.MONGO_PASSWORD}@{self.MONGO_HOST}:{self.MONGO_PORT}/"
+
+
+class NoEmailFound(Exception):
+    """No email found exception."""
 
 
 def clean_html_newline_chars(html_content):
@@ -125,7 +159,6 @@ class HtmlCleaner:
             text = element.get_text(separator=" ", strip=True)
             text = text.replace("\xa0", " ")
             text = re.sub(r"\s+", " ", text).strip()  # Consolidate multiple spaces
-            text = text.replace(";", " ")
             return text if text else None  # Return None if empty after cleaning
         return None
 
@@ -393,14 +426,6 @@ class EmailContent:
             )
         else:
             self.body_preview = ""
-        if self.body_txt:
-            self.body_preview = (
-                self.body_txt
-                if len(self.body_txt) < preview_length
-                else self.body_txt[:preview_length]
-            )
-        else:
-            self.body_preview = ""
 
 
 class EmailClient:
@@ -433,11 +458,15 @@ class EmailClient:
 
             query = " ".join(query_parts)
 
-            # Get a list of messages thatÏ match the query
+            # Get a list of messages that match the query
+            lg.info(f"query: {query}")
             response = (
                 self.service.users().messages().list(userId=user_id, q=query).execute()
             )
             messages = response.get("messages", [])
+            if not messages:
+                raise NoEmailFound("No emails found matching the criteria.")
+            lg.info(f"retrieved {len(messages)} messages")
 
             for i, message in enumerate(messages, 1):
                 em = self.get_message(message_id=message["id"], user_id=user_id)
@@ -563,9 +592,106 @@ class AppleEmailClient(EmailClient):
         )
 
 
-def main():
+class MongoDBHelper:
+    client: Optional[MongoClient] = None
+    db: Optional[Any] = None
+    collection: Optional[Any] = None
+
+    def __init__(self, conn_str: str):
+        self.client = self.get_mongo_client(uri=conn_str)
+
+    def connect_to_apple_gmail_collections(
+        self,
+        db_name: str = "googlereader",
+        collection_name: str = "apple_gmail",
+        timeseries: dict = {
+            "timeField": "timestamp",
+            "metaField": "metadata",
+            "granularity": "seconds",
+        },
+    ):
+        if self.client is None:
+            raise ConnectionFailure("MongoDB client is not connected.")
+        self.db = self.client[db_name]
+        if collection_name not in self.db.list_collection_names():
+            self.collection = self.db[collection_name]
+            lg.warning(f"creating {collection_name=}")
+            self.db.create_collection(
+                collection_name,
+                timeseries=timeseries,
+            )
+        self.collection = self.db.get_collection(collection_name)
+        lg.info(f"connected to {collection_name=}")
+        return self.collection
+
+    def get_mongo_client(self, uri):
+        """Connects to MongoDB and returns the client."""
+        try:
+            client = MongoClient(uri)
+            client.admin.command("ping")  # Verify connection
+            lg.info("MongoDB connection successful.")
+            return client
+        except ConnectionFailure:
+            lg.error(
+                "MongoDB connection failed. Ensure MongoDB is running and URI is correct."
+            )
+            return None
+        except Exception as e:
+            print(f"An error occurred with MongoDB connection: {e}")
+            return None
+
+    def save_doc_to_timeseries(
+        self, metadata: dict[Any, Any], data_in: dict[Any, Any]
+    ) -> bool:
+        data = copy.deepcopy(data_in)
+        if self.collection is None:
+            return False
+        try:
+            timestamp_str = data_in.get("rcv_date", None)
+            match timestamp_str:
+                case str():
+                    dt_object = datetime.datetime.strptime(
+                        timestamp_str, "%Y-%m-%d %H:%M:%S%z"
+                    )
+                    data.pop("rcv_date", None)
+                case _:
+                    dt_object = get_utc_timestamp_now()
+                    lg.warning(
+                        "no timestamp found from gmail received date, using current time"
+                    )
+
+            data.update(
+                {
+                    "timestamp": dt_object,
+                    "metadata": metadata,
+                }
+            )
+            result = self.collection.insert_one(data)
+            lg.info(f"Data inserted with ID: {result.inserted_id}")
+            return True
+        except Exception as e:
+            lg.error(f"Error storing data in MongoDB: {e}")
+            return False
+
+    def save_to_mongo(self, data: dict):
+        """Stores data in the specified MongoDB collection."""
+        if not self.collection:
+            return False
+        try:
+            result = self.collection.insert_one(data)
+            lg.info(f"Data inserted with ID: {result.inserted_id}")
+            return True
+        except Exception as e:
+            lg.error(f"Error storing data in MongoDB: {e}")
+            return False
+
+    def get_from_mongo(self, query):
+        pass
+
+
+def main1():
     ap = AppleEmailClient()
-    ap.run(debug_email_limit=0)
+    ap.run(debug_email_limit=10)
     datalist = []
     for em in ap.emails:
         data = {}
@@ -577,7 +703,44 @@ def main():
     df = pd.DataFrame(datalist)
     df.to_csv("output.csv")
     print(df)
-    # print(ap.emails)
+
+
+def main():
+    config = Config()
+    df = pd.read_csv("output.csv", index_col=0)
+    if config.MONGO_CONNECTION_STRING is None:
+        raise ValueError(
+            "MongoDB connection string is not set. Please check your environment variables."
+        )
+    mgdb = MongoDBHelper(config.MONGO_CONNECTION_STRING)
+    mgdb.connect_to_apple_gmail_collections()
+
+    for i, row in df.iterrows():
+        data = {
+            "sender": row["sender"],
+            "subject": row["subject"],
+            "rcv_date": row["rcv_date"],
+            "apple_account": row["apple_account"],
+            "invoice_date": row["invoice_date"],
+            "sequence_no": row["sequence_no"],
+            "billed_to": row["billed_to"],
+            "order_id": row["order_id"],
+            "document_no": row["document_no"],
+            "price": row["price"],
+            "item": row["item"],
+        }
+        meta = {
+            "email_type": "apple_invoices",
+            "apple_account": row["apple_account"],
+        }
+
+        mgdb.save_doc_to_timeseries(metadata=meta, data_in=data)
+
+    #
+
+    # TODO:
+    # 1. parse refund cost -S$5.98 (MNY3W7327B and MNY3W7327B-1)
+    # 2. parse format change (MM611014M2) query `from:(no_reply@email.apple.com) before:2024/8/1 `
 
 
 if __name__ == "__main__":
