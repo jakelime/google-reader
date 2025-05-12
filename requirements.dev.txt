@@ -4,5 +4,10 @@ google-auth-httplib2
 google-auth-oauthlib
 pandas
 beautifulsoup4
+types-beautifulsoup4
+html5lib
+
+pymongo
 
 djlint
+python-dotenv

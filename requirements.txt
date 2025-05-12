@@ -5,3 +5,5 @@ google-auth-oauthlib
 pandas
 
 beautifulsoup4
+types-beautifulsoup4
+html5lib
