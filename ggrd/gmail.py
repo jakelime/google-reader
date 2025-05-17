@@ -15,7 +15,8 @@ import pandas as pd
 from bs4 import BeautifulSoup, Tag
 from bs4.element import NavigableString
 from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, OperationFailure, ConfigurationError
+from pymongo.errors import ConfigurationError, ConnectionFailure, OperationFailure
+from pymongo.results import InsertOneResult
 
 from ggrd.auth import GoogleAuthManager
 from ggrd.custom_logger import getLogger
@@ -616,27 +617,16 @@ class AppleEmailClient(EmailClient):
 
 
 class MongoDBHelper:
-    """
-    A helper class for interacting with MongoDB, designed to be used as a context manager.
-    """
-    # TODO: Work on MongoDB helper class.
-    # MongoDBHelper_old is working,
-    # but we need a better one with __enter__ and __exit__ methods.
+    client: Optional[MongoClient] = None
+    db: Optional[Any] = None
+    collection: Optional[Any] = None
 
-    def __init__(self, mongo_uri: str, database_name: str, collection_name: str):
-        """
-        Initializes the MongoHelper with connection details.
-
-        Args:
-            mongo_uri (str): The MongoDB connection URI (e.g., "mongodb://localhost:27017/").
-            database_name (str): The name of the database to connect to.
-            collection_name (str): The name of the collection to operate on.
-        """
-        if not all([mongo_uri, database_name, collection_name]):
-            raise ValueError(
-                "mongo_uri, database_name, and collection_name cannot be empty."
-            )
-
+    def __init__(
+        self,
+        mongo_uri: Optional[str] = None,
+        database_name: Optional[str] = "googlereader",
+        collection_name: Optional[str] = "apple_gmail",
+    ):
         self.mongo_uri = mongo_uri
         self.database_name = database_name
         self.collection_name = collection_name
@@ -644,33 +634,31 @@ class MongoDBHelper:
         self.db = None
         self.collection = None
 
+    def connect_to_apple_gmail_collections(
+        self,
+        db: Any,
+        collection_name: str,
+        timeseries: dict = {
+            "timeField": "timestamp",
+            "metaField": "metadata",
+            "granularity": "seconds",
+        },
+    ):
+        if collection_name not in db.list_collection_names():
+            collection = db[collection_name]
+            lg.warning(f"creating {collection_name=}")
+            db.create_collection(
+                collection_name,
+                timeseries=timeseries,
+            )
+        collection = db.get_collection(collection_name)
+        lg.debug(f"connected to {collection_name=}")
+        return collection
+
     def __enter__(self):
-        """
-        Establishes the MongoDB connection and returns the helper instance.
-        This method is called when entering a 'with' statement.
-        """
-        try:
-            self.client = MongoClient(self.mongo_uri)
-            # The ismaster command is cheap and does not require auth.
-            self.client.admin.command("ismaster")  # Verifies connection
-            self.db = self.client[self.database_name]
-            self.collection = self.db[self.collection_name]
-            lg.info(
-                f"Successfully connected to MongoDB: {self.mongo_uri}, DB: {self.database_name}, Collection: {self.collection_name}"
-            )
-            return self
-        except ConnectionFailure as e:
-            lg.error(f"Connection failed: {e}")
-            # Reraise to ensure __exit__ is called and to inform the caller
-            raise ConnectionFailure(
-                f"Could not connect to MongoDB at {self.mongo_uri}: {e}"
-            )
-        except ConfigurationError as e:
-            lg.error(f"Configuration error: {e}")
-            raise ConfigurationError(f"MongoDB URI or configuration is invalid: {e}")
-        except Exception as e:  # Catch any other potential exceptions during connection
-            lg.error(f"An unexpected error occurred during connection: {e}")
-            raise
+        if self.client is None:
+            self.connect_by_default()
+        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """
@@ -694,210 +682,69 @@ class MongoDBHelper:
             )
         return False  # Propagate exceptions
 
-    def write_data(self, data):
-        """
-        Writes data to the specified MongoDB collection.
-
-        Args:
-            data: A dictionary representing a single document or a list of dictionaries
-                  representing multiple documents to be inserted.
-
-        Returns:
-            The result of the insert operation (e.g., InsertOneResult or InsertManyResult)
-            or None if an error occurs or the collection is not available.
-        """
-        if self.collection is None:
-            print(
-                "Error: Collection is not initialized. Ensure connection was successful."
-            )
-            return None
-
-        if not data:
-            print("Warning: No data provided to write.")
-            return None
-
+    def connect_by_default(self):
         try:
-            if isinstance(data, dict):
-                result = self.collection.insert_one(data)
-                print(f"Successfully inserted 1 document. ID: {result.inserted_id}")
-                return result
-            elif isinstance(data, list):
-                if not all(isinstance(doc, dict) for doc in data):
-                    raise TypeError("All items in the list must be dictionaries.")
-                if not data:  # Empty list
-                    print("Warning: Provided list of documents is empty.")
-                    return None
-                result = self.collection.insert_many(data)
-                print(f"Successfully inserted {len(result.inserted_ids)} documents.")
-                return result
-            else:
-                raise TypeError("Data must be a dictionary or a list of dictionaries.")
-        except OperationFailure as e:
-            print(f"Error writing data: {e.details.get('errmsg', e)}")
-            return None
-        except TypeError as e:
-            print(f"Type error during write operation: {e}")
-            return None
-        except Exception as e:
-            print(f"An unexpected error occurred during write_data: {e}")
-            return None
-
-    def read_data(
-        self,
-        query: Optional[dict] = None,
-        projection: Optional[dict] = None,
-        limit: int = 0,
-        sort_criteria: Optional[list] = None,
-    ):
-        """
-        Reads data from the specified MongoDB collection.
-
-        Args:
-            query (dict, optional): The query criteria (e.g., {"name": "John"}).
-                                    Defaults to None (match all documents).
-            projection (dict, optional): Specifies the fields to include or exclude
-                                         (e.g., {"name": 1, "_id": 0}).
-                                         Defaults to None (include all fields).
-            limit (int, optional): The maximum number of documents to return.
-                                   Defaults to 0 (no limit).
-            sort_criteria (list, optional): A list of (key, direction) tuples for sorting.
-                                            Example: [("name", 1), ("age", -1)].
-                                            1 for ascending, -1 for descending.
-                                            Defaults to None (no specific sort order).
-
-        Returns:
-            A list of documents matching the criteria, or an empty list if no documents
-            are found or an error occurs.
-        """
-        if not self.collection:
-            print(
-                "Error: Collection is not initialized. Ensure connection was successful."
+            if not all([self.mongo_uri, self.database_name, self.collection_name]):
+                raise ValueError(
+                    "mongo_uri, database_name, and collection_name cannot be empty."
+                )
+            self.client = MongoClient(self.mongo_uri)
+            # The ismaster command is cheap and does not require auth.
+            self.client.admin.command("ismaster")  # Verifies connection
+            self.db = self.client[self.database_name]  # type: ignore
+            self.collection = self.connect_to_apple_gmail_collections(
+                db=self.db,
+                collection_name=self.collection_name,  # type: ignore
             )
-            return []
-
-        if query is None:
-            query = {}  # Match all documents if no query is provided
-
-        try:
-            cursor = self.collection.find(query, projection)
-
-            if sort_criteria:
-                # Ensure sort_criteria is a list of tuples
-                if not isinstance(sort_criteria, list) or not all(
-                    isinstance(item, tuple) and len(item) == 2 for item in sort_criteria
-                ):
-                    raise ValueError(
-                        "sort_criteria must be a list of (key, direction) tuples."
-                    )
-                cursor = cursor.sort(sort_criteria)
-
-            if limit > 0:
-                cursor = cursor.limit(limit)
-
-            documents = list(cursor)
-            print(f"Successfully read {len(documents)} documents.")
-            return documents
-        except OperationFailure as e:
-            print(f"Error reading data: {e.details.get('errmsg', e)}")
-            return []
-        except ValueError as e:  # For invalid sort_criteria
-            print(f"Value error during read operation: {e}")
-            return []
-        except Exception as e:
-            print(f"An unexpected error occurred during read_data: {e}")
-            return []
-
-
-class MongoDBHelper_old:
-    client: Optional[MongoClient] = None
-    db: Optional[Any] = None
-    collection: Optional[Any] = None
-
-    def __init__(self, conn_str: str):
-        self.conn_str = conn_str
-        self.client = self.get_mongo_client(uri=conn_str)
-
-    def connect_to_apple_gmail_collections(
-        self,
-        client: MongoClient,
-        db_name: str = "googlereader",
-        collection_name: str = "apple_gmail",
-        timeseries: dict = {
-            "timeField": "timestamp",
-            "metaField": "metadata",
-            "granularity": "seconds",
-        },
-    ):
-        if client is None:
-            raise ConnectionFailure("MongoDB client is not connected.")
-        db = client[db_name]
-        if collection_name not in db.list_collection_names():
-            collection = db[collection_name]
-            lg.warning(f"creating {collection_name=}")
-            db.create_collection(
-                collection_name,
-                timeseries=timeseries,
+            lg.info("successfully connected to MongoDB.")
+            lg.info("connection parameters:")
+            lg.info(f"connected to {self.mongo_uri=}")
+            lg.info(f"connected to {self.database_name=}")
+            lg.info(f"connected to {self.collection_name=}")
+            return self
+        except ConnectionFailure as e:
+            lg.error(f"Connection failed: {e}")
+            # Reraise to ensure __exit__ is called and to inform the caller
+            raise ConnectionFailure(
+                f"Could not connect to MongoDB at {self.mongo_uri}: {e}"
             )
-        collection = db.get_collection(collection_name)
-        lg.info(f"connected to {collection_name=}")
-        return collection
-
-    def get_mongo_client(self, uri):
-        """Connects to MongoDB and returns the client."""
-        try:
-            client = MongoClient(uri)
-            client.admin.command("ping")  # Verify connection
-            lg.info("MongoDB connection successful.")
-            return client
-        except ConnectionFailure:
-            lg.error(
-                "MongoDB connection failed. Ensure MongoDB is running and URI is correct."
-            )
-            return None
-        except Exception as e:
-            print(f"An error occurred with MongoDB connection: {e}")
-            return None
+        except ConfigurationError as e:
+            lg.error(f"Configuration error: {e}")
+            raise ConfigurationError(f"MongoDB URI or configuration is invalid: {e}")
+        except Exception as e:  # Catch any other potential exceptions during connection
+            lg.error(f"An unexpected error occurred during connection: {e}")
+            raise
 
     def save_doc_to_timeseries(
         self, metadata: dict[Any, Any], data_in: dict[Any, Any]
-    ) -> bool:
-        with MongoClient(self.conn_str) as client:
-            collection = self.connect_to_apple_gmail_collections(client)
-            if collection is None:
-                return False
-
-            data = copy.deepcopy(data_in)
-
-            try:
-                timestamp_str = data_in.get("rcv_date", None)
-                match timestamp_str:
-                    case str():
-                        dt_object = datetime.datetime.strptime(
-                            timestamp_str, "%Y-%m-%d %H:%M:%S%z"
-                        )
-                        data.pop("rcv_date", None)
-                    case _:
-                        dt_object = get_utc_timestamp_now()
-                        lg.warning(
-                            "no timestamp found from gmail received date, using current time"
-                        )
-
-                data.update(
-                    {
-                        "timestamp": dt_object,
-                        "metadata": metadata,
-                    }
+    ) -> InsertOneResult | None:
+        if self.collection is None:
+            lg.error(
+                "Error: Collection is not initialized. Ensure connection was successful."
+            )
+            return None
+        data = copy.deepcopy(data_in)
+        timestamp_str = data_in.get("rcv_date", None)
+        match timestamp_str:
+            case str():
+                dt_object = datetime.datetime.strptime(
+                    timestamp_str, "%Y-%m-%d %H:%M:%S%z"
                 )
-                result = collection.insert_one(data)
-                lg.info(f"Data inserted with ID: {result.inserted_id}")
-                return True
+                data.pop("rcv_date", None)
+            case _:
+                dt_object = get_utc_timestamp_now()
+                lg.warning(
+                    "no timestamp found from gmail received date, using current time"
+                )
 
-            except Exception as e:
-                lg.error(f"Error storing data in MongoDB: {e}")
-                return False
-
-    def get_from_mongo(self, query):
-        pass
+        data.update(
+            {
+                "timestamp": dt_object,
+                "metadata": metadata,
+            }
+        )
+        result = self.collection.insert_one(data)
+        return result
 
 
 def main1():
@@ -923,39 +770,47 @@ def main():
         raise ValueError(
             "MongoDB connection string is not set. Please check your environment variables."
         )
-    mgdb = MongoDBHelper(config.MONGO_CONNECTION_STRING)
 
-    for i, row in df.iterrows():
-        data = {
-            "sender": row["sender"],
-            "subject": row["subject"],
-            "rcv_date": row["rcv_date"],
-            "apple_account": row["apple_account"],
-            "invoice_date": row["invoice_date"],
-            "sequence_no": row["sequence_no"],
-            "billed_to": row["billed_to"],
-            "order_id": row["order_id"],
-            "document_no": row["document_no"],
-            "price": row["price"],
-            "item": row["item"],
-        }
-        meta = {
-            "email_type": "apple_invoices",
-            "apple_account": row["apple_account"],
-        }
-        unique_data = {
-            "email_rcv_date": data["rcv_date"],
-            "account": data["apple_account"],
-            "invoice_date": data["invoice_date"],
-            "order_id": data["order_id"],
-        }
-        data.update(
-            {
-                "unique_hash": create_dict_hash(unique_data),
+    with MongoDBHelper(config.MONGO_CONNECTION_STRING) as mgdb:
+        for i, row in df.iterrows():
+            data = {
+                "sender": row["sender"],
+                "subject": row["subject"],
+                "rcv_date": row["rcv_date"],
+                "apple_account": row["apple_account"],
+                "invoice_date": row["invoice_date"],
+                "sequence_no": row["sequence_no"],
+                "billed_to": row["billed_to"],
+                "order_id": row["order_id"],
+                "document_no": row["document_no"],
+                "price": row["price"],
+                "item": row["item"],
             }
-        )
+            meta = {
+                "email_type": "apple_invoices",
+                "apple_account": row["apple_account"],
+            }
+            unique_data = {
+                "email_rcv_date": data["rcv_date"],
+                "account": data["apple_account"],
+                "invoice_date": data["invoice_date"],
+                "order_id": data["order_id"],
+            }
+            data.update(
+                {
+                    "unique_hash": create_dict_hash(unique_data),
+                }
+            )
 
-        mgdb.save_doc_to_timeseries(metadata=meta, data_in=data)
+            result = mgdb.save_doc_to_timeseries(metadata=meta, data_in=data)
+            if result is not None:
+                lg.info(
+                    f"email#{i} (rcv_date={data['rcv_date']})saved to MongoDB (oid={result.inserted_id})"
+                )
+            else:
+                lg.warning(
+                    f"email#{i} failed to save to MongoDB, check the connection and data."
+                )
 
     #
 
