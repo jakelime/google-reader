@@ -2,7 +2,8 @@ import copy
 import datetime
 from typing import Any, Optional
 
-from pymongo import MongoClient
+import pymongo as pymg
+from pymongo import MongoClient, cursor
 from pymongo.errors import ConfigurationError, ConnectionFailure
 from pymongo.results import InsertOneResult
 
@@ -142,3 +143,12 @@ class MongoDBHelper:
         )
         result = self.collection.insert_one(data)
         return result
+
+    def get_all_documents(self) -> cursor.Cursor | None:
+        if self.collection is None:
+            lg.error(
+                "Error: Collection is not initialized. Ensure connection was successful."
+            )
+            return None
+        documents = self.collection.find({})
+        return documents

@@ -1,16 +1,20 @@
+import dataclasses
+
 import pandas as pd
 
 from ggrd import utils
 from ggrd.configs.config import config
 from ggrd.custom_logger import getLogger
 from ggrd.db import MongoDBHelper
+from ggrd.reader import Reader
+from ggrd.gmail import AppleEmailClient
 
 lg = getLogger()
 # pd.set_option("display.max_columns", None)
 # pd.set_option("display.max_rows", None)
 
 
-def main():
+def write_from_csv():
     df = pd.read_csv("output.csv", index_col=0)
     if config.MONGO_CONNECTION_STRING is None:
         raise ValueError(
@@ -63,5 +67,37 @@ def main():
     # 2. parse format change (MM611014M2) query `from:(no_reply@email.apple.com) before:2024/8/1 `
 
 
+def reader():
+    with MongoDBHelper(config.MONGO_CONNECTION_STRING) as mgdb:
+        # Get all documents from the collection
+        documents = mgdb.get_all_documents()
+        if documents is None:
+            lg.error("No documents found or connection failed.")
+            return
+
+        df = Reader().read_documents_to_dataframe(mongo_documents=documents)  # type: ignore
+        df.to_csv("output-readback.csv")
+        print(df)
+
+        # TODO: see the output
+        # now, prevent duplicate data from being inserted into MongoDB
+
+
+def extract_from_gmail():
+    ap = AppleEmailClient()
+    ap.run(debug_email_limit=10)
+    datalist = []
+    for em in ap.emails:
+        data = {}
+        data["sender"] = em.sender
+        data["subject"] = em.subject
+        data["rcv_date"] = em.rcv_date
+        data.update(em.data)
+        datalist.append(data)
+    df = pd.DataFrame(datalist)
+    df.to_csv("output1.csv")
+    print(df)
+
+
 if __name__ == "__main__":
-    main()
+    extract_from_gmail()

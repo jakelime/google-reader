@@ -9,6 +9,7 @@ class Config:
     MONGO_PASSWORD: str = os.getenv("MONGO_PASSWORD", "root")
     MONGO_CONNECTION_STRING: Optional[str] = os.getenv("MONGO_CONNECTION_STRING", None)
     DATETIME_FMT = "%Y-%m-%d %H:%M:%S"
+    LOCAL_TZ = "Asia/Singapore"
 
     def __init__(self):
         self.init_databases()

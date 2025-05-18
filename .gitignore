@@ -5,8 +5,8 @@
 client_secret*.json
 *credentials.json
 *token.json
-
-
+*.csv
+apptempfiles/
 ### macOS ###
 # General
 .DS_Store
