@@ -71,7 +71,7 @@ def reader():
     with MongoDBHelper(config.MONGO_CONNECTION_STRING) as mgdb:
         # Get all documents from the collection
         documents = mgdb.get_all_documents()
-        if documents is None:
+        if not documents:
             lg.error("No documents found or connection failed.")
             return
 
@@ -79,24 +79,43 @@ def reader():
         df.to_csv("output-readback.csv")
         print(df)
 
-        # TODO: see the output
-        # now, prevent duplicate data from being inserted into MongoDB
-
 
 def extract_from_gmail():
     ap = AppleEmailClient()
-    ap.run(debug_email_limit=10)
-    datalist = []
-    for em in ap.emails:
-        data = {}
-        data["sender"] = em.sender
-        data["subject"] = em.subject
-        data["rcv_date"] = em.rcv_date
-        data.update(em.data)
-        datalist.append(data)
-    df = pd.DataFrame(datalist)
-    df.to_csv("output1.csv")
-    print(df)
+    ap.run(debug_email_limit=1)
+    # print(f"{ap.emails=}")
+    # for email in ap.emails:
+    #     print(f"{email.sender=}")
+    #     print(f"{email.subject=}")
+    #     print(f"{email.rcv_date=}")
+    #     print(f"{email.data=}")
+    with MongoDBHelper(
+        config.MONGO_CONNECTION_STRING,
+        database_name="googlereader",
+        collection_name="apple_invoices_emails_raw",
+    ) as mgdb:
+        for email in ap.emails:
+            data = email.data
+            metadata = email.metadata
+            timestamp = metadata["rcv_date"]
+            lg.info(f"{timestamp=}")
+            result = mgdb.save_doc_to_timeseries(
+                metadata=metadata,
+                data_in=data,
+                timestamp=metadata["rcv_date"],
+            )
+
+    # datalist = []
+    # for em in ap.emails:
+    #     data = {}
+    #     data["sender"] = em.sender
+    #     data["subject"] = em.subject
+    #     data["rcv_date"] = em.rcv_date
+    #     data.update(em.data)
+    #     datalist.append(data)
+    # df = pd.DataFrame(datalist)
+    # df.to_csv("output1.csv")
+    # print(df)
 
 
 if __name__ == "__main__":

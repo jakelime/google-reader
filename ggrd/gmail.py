@@ -40,6 +40,15 @@ class EmailContent:
             self.body_preview = ""
 
 
+@dataclasses.dataclass
+class RawEmailContent:
+    sender: Optional[str] = None
+    subject: Optional[str] = None
+    rcv_date: Optional[datetime.datetime] = None
+    metadata: Optional[dict] = dataclasses.field(default_factory=dict)
+    data: Optional[dict] = dataclasses.field(default_factory=dict)
+
+
 class EmailClient:
     def __init__(self):
         self.emails = []
@@ -54,7 +63,7 @@ class EmailClient:
         after_date: Optional[str] = None,
         before_date: Optional[str] = None,
         subject: Optional[str] = None,
-        limit: int = 0,
+        limit: int = 100,
     ):
         try:
             # Build a query string to filter messages by sender
@@ -73,7 +82,10 @@ class EmailClient:
             # Get a list of messages that match the query
             lg.info(f"query: {query}")
             response = (
-                self.service.users().messages().list(userId=user_id, q=query).execute()
+                self.service.users()
+                .messages()
+                .list(userId=user_id, q=query, maxResults=limit)
+                .execute()
             )
             messages = response.get("messages", [])
             if not messages:
@@ -87,6 +99,7 @@ class EmailClient:
                 if limit:
                     if i >= limit:
                         break
+            return self.emails
 
         except Exception as error:
             lg.error(f"An error occurred: {error}", exc_info=True)
@@ -132,7 +145,7 @@ class EmailClient:
         lg.info("logout successful")
 
 
-class AppleEmailClient(EmailClient):
+class AppleEmailClientWithParser(EmailClient):
     def __init__(self):
         super().__init__()
 
@@ -199,4 +212,64 @@ class AppleEmailClient(EmailClient):
 
         return EmailContent(
             sender=sender, subject=subject, rcv_date=rcv_date, data=data
+        )
+
+
+class AppleEmailClient(EmailClient):
+    def __init__(self):
+        super().__init__()
+
+    def run(self, after_date: Optional[str] = None, debug_email_limit: int = 0):
+        # Get and print the messages in the user's inbox
+        self.get_messages(
+            sender_email="no_reply@email.apple.com",
+            after_date=after_date,
+            subject='"Your invoice from Apple."',
+            limit=debug_email_limit,
+        )
+
+    def get_message(self, message_id, user_id="me") -> RawEmailContent:
+        msg = (
+            self.service.users().messages().get(userId=user_id, id=message_id).execute()
+        )
+        metadata = {}
+        payload = msg["payload"]
+        headers = payload["headers"]
+        subject = next(
+            (header["value"] for header in headers if header["name"] == "Subject"),
+            "No Subject",
+        )
+        sender = next(
+            (header["value"] for header in headers if header["name"] == "From"),
+            "No Sender",
+        )
+        rcv_date = next(
+            (header["value"] for header in headers if header["name"] == "Received"),
+            "No Received",
+        )
+
+        try:
+            date_string_part = rcv_date.split(";")[-1].strip()
+            rcv_date = email.utils.parsedate_to_datetime(date_string_part)
+        except Exception as e:
+            lg.warning(f"date parsing failed: {e=}")
+            rcv_date = None
+
+        metadata["subject"] = subject
+        metadata["sender"] = sender
+        metadata["rcv_date"] = rcv_date
+        lg.info(f"metadata: {metadata=}")
+
+        # TODO: send raw to MongoDB is done
+        # 1. parse, send to raw collection
+        # 2. convert rcv_date to local timezone
+        # 3. create unique hash identifier for datetime_sender_subject
+        # 4. review save to MongoDB (avoid duplicate)
+
+        return RawEmailContent(
+            sender=sender,
+            subject=subject,
+            rcv_date=rcv_date,
+            metadata=metadata,
+            data=payload,
         )

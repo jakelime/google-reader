@@ -114,7 +114,10 @@ class MongoDBHelper:
             raise
 
     def save_doc_to_timeseries(
-        self, metadata: dict[Any, Any], data_in: dict[Any, Any]
+        self,
+        metadata: dict[Any, Any],
+        data_in: dict[Any, Any],
+        timestamp: str | datetime.datetime | None = None,
     ) -> InsertOneResult | None:
         if self.collection is None:
             lg.error(
@@ -122,19 +125,16 @@ class MongoDBHelper:
             )
             return None
         data = copy.deepcopy(data_in)
-        timestamp_str = data_in.get("rcv_date", None)
-        match timestamp_str:
+        match timestamp:
+            case datetime.datetime():
+                dt_object = timestamp
             case str():
-                dt_object = datetime.datetime.strptime(
-                    timestamp_str, "%Y-%m-%d %H:%M:%S%z"
-                )
-                data.pop("rcv_date", None)
+                dt_object = datetime.datetime.strptime(timestamp, "%Y-%m-%d %H:%M:%S%z")
             case _:
                 dt_object = get_utc_timestamp_now()
                 lg.warning(
                     "no timestamp found from gmail received date, using current time"
                 )
-
         data.update(
             {
                 "timestamp": dt_object,
@@ -144,11 +144,10 @@ class MongoDBHelper:
         result = self.collection.insert_one(data)
         return result
 
-    def get_all_documents(self) -> cursor.Cursor | None:
+    def get_all_documents(self) -> list:
         if self.collection is None:
-            lg.error(
-                "Error: Collection is not initialized. Ensure connection was successful."
-            )
-            return None
-        documents = self.collection.find({})
-        return documents
+            lg.error("collection is not initialized.")
+            return []
+        query = {}
+        documents = self.collection.find(query)
+        return list(documents)
