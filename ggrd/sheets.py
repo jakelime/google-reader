@@ -7,8 +7,8 @@ import pandas as pd
 from gspread.worksheet import Worksheet
 
 from ggrd import auth
-from ggrd.common_vars import APP_NAME
-from ggrd.config import config
+from ggrd import _APP_NAME
+from ggrd.configs.config import config
 from ggrd.custom_logger import getLogger
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -118,7 +118,7 @@ class GoogleSheetClient:
 
 
 def main():
-    gsc = GoogleSheetClient(spreadsheet_name=f"{APP_NAME}-Outpost-ClimbRecords")
+    gsc = GoogleSheetClient(spreadsheet_name=f"{_APP_NAME}-Outpost-ClimbRecords")
     ws = gsc.get_worksheet("data")
 
 

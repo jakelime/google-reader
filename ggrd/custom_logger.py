@@ -15,11 +15,11 @@ Advanced use cse:
 Init method will set up a python logger object using a customised
 settings by default.
 - Rotating filehandler (5 files, 2MB)
-- Logger name = global APP_NAME
+- Logger name = global _APP_NAME
 - StreamHandler enabled
 
 By best practices, log files will be stored in the log directory
-`$OS_LOG_DIRECTORY / $APP_NAME / main_application.log.1`
+`$OS_LOG_DIRECTORY / $_APP_NAME / main_application.log.1`
 """
 
 import logging
@@ -28,10 +28,10 @@ import platform
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from .common_vars import APP_NAME
+from ggrd import _APP_NAME
 
 
-def getLogger(app_name: str = APP_NAME, debug: bool = False) -> logging.Logger:
+def getLogger(app_name: str = _APP_NAME, debug: bool = False) -> logging.Logger:
     log_mgr = LoggerManager(app_name=app_name)
     logger = log_mgr.getLogger()
     if debug:
@@ -61,7 +61,7 @@ class LoggerManager:
     """Helper class to generate a logger object, based from logging.Logger.
     Init method will set up a python logger object using my customised settings.
     - Rotating filehandler (5 files, 2MB)
-    - Logger name = global APP_NAME
+    - Logger name = global _APP_NAME
     - StreamHandler enabled
 
     Simple use case is to import custom_logger.py, then call function getLogger().
@@ -69,7 +69,7 @@ class LoggerManager:
     LoggerManager.getLogger().
 
     Following best practices, log files will be stored in the log directory
-    $OS_LOG_DIRECTORY / $APP_NAME / main_application.log.1
+    $OS_LOG_DIRECTORY / $_APP_NAME / main_application.log.1
     """
 
     logger_filepath = None
@@ -139,7 +139,7 @@ class LoggerManager:
         self.logger_filepath = logger_filepath
         return logger_filepath
 
-    def setLevel(self, level: str = "INFO") -> logging.Logger:
+    def setLevel(self, level: str = "INFO") -> None:
         match level.lower():
             case "info":
                 self.logger.setLevel("INFO")
