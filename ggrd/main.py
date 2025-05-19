@@ -80,42 +80,60 @@ def reader():
         print(df)
 
 
-def extract_from_gmail():
+def extract_from_gmail(limit: int = 20):
+    # TODO:
+    # Now, we are able to retreive emails from Gmail, then insert them to MongoDB
+    # Next,
+    # 1. In AppleEmailClient.run(), we need to query based on the last date range
+    # 2. In AppleEmailClient.run(), we need to use a while loop to retreive all emails
+    # 3. Parse the email content to get the invoice details
+    # 4. Save the parsed data to MongoDB Parsed collection
     ap = AppleEmailClient()
-    ap.run(debug_email_limit=1)
-    # print(f"{ap.emails=}")
-    # for email in ap.emails:
-    #     print(f"{email.sender=}")
-    #     print(f"{email.subject=}")
-    #     print(f"{email.rcv_date=}")
-    #     print(f"{email.data=}")
-    with MongoDBHelper(
-        config.MONGO_CONNECTION_STRING,
-        database_name="googlereader",
-        collection_name="apple_invoices_emails_raw",
-    ) as mgdb:
-        for email in ap.emails:
-            data = email.data
-            metadata = email.metadata
-            timestamp = metadata["rcv_date"]
-            lg.info(f"{timestamp=}")
-            result = mgdb.save_doc_to_timeseries(
-                metadata=metadata,
-                data_in=data,
-                timestamp=metadata["rcv_date"],
-            )
+    ap.run(debug_email_limit=limit)
+    for email in ap.emails:
+        data = email.data
+        metadata = email.metadata
+        timestamp = metadata["rcv_date"]
+        email_record_hash = utils.hash_metadata(metadata)
+        metadata["email_record_hash"] = email_record_hash
+        inserted_result = None
 
-    # datalist = []
-    # for em in ap.emails:
-    #     data = {}
-    #     data["sender"] = em.sender
-    #     data["subject"] = em.subject
-    #     data["rcv_date"] = em.rcv_date
-    #     data.update(em.data)
-    #     datalist.append(data)
-    # df = pd.DataFrame(datalist)
-    # df.to_csv("output1.csv")
-    # print(df)
+        # Gets email record from MongoDB, if not found, save to timeseries collection
+        with MongoDBHelper(
+            config.MONGO_CONNECTION_STRING,
+            database_name="googlereader",
+            collection_name="apple_invoices_emails_raw",
+        ) as mgdb:
+            # Check if the document already exists in the collection
+            doc = mgdb.get_email_by_hash(email_record_hash=email_record_hash)
+            if doc is None:
+                # If it doesn't exist, save the new document
+                inserted_result = mgdb.save_doc_to_timeseries(
+                    metadata=metadata,
+                    data_in=data,
+                    timestamp=timestamp,
+                )
+                lg.info(f"inserted new record: {inserted_result=}")
+                doc = mgdb.get_email_by_hash(email_record_hash=email_record_hash)
+
+        # Writes a record of the transaction saved to timeseries collection
+        with MongoDBHelper(
+            config.MONGO_CONNECTION_STRING,
+            database_name="googlereader",
+            collection_name="gmail_transactions",
+        ) as mgdb:
+            if inserted_result is not None:
+                # If it doesn't exist, save the new document
+                inserted_transaction_result = mgdb.save_doc_to_timeseries(
+                    metadata={"email_record_hash": email_record_hash},
+                    data_in={
+                        "sender": metadata["sender"],
+                        "subject": metadata["subject"],
+                        "email_rcv_date": metadata["rcv_date"],
+                    },
+                    timestamp=utils.get_utc_timestamp_now(),
+                )
+                lg.info(f"recorded transaction: {inserted_transaction_result=}")
 
 
 if __name__ == "__main__":

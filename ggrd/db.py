@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import pymongo as pymg
 from pymongo import MongoClient, cursor
+from pymongo.collection import ReturnDocument
 from pymongo.errors import ConfigurationError, ConnectionFailure
 from pymongo.results import InsertOneResult
 
@@ -23,15 +24,21 @@ class MongoDBHelper:
         mongo_uri: Optional[str] = None,
         database_name: Optional[str] = "googlereader",
         collection_name: Optional[str] = "apple_gmail",
+        timeseries: dict = {
+            "timeField": "timestamp",
+            "metaField": "metadata",
+            "granularity": "seconds",
+        },
     ):
         self.mongo_uri = mongo_uri
         self.database_name = database_name
         self.collection_name = collection_name
+        self.timeseries = timeseries
         self.client = None
         self.db = None
         self.collection = None
 
-    def connect_to_apple_gmail_collections(
+    def get_or_create_collections(
         self,
         db: Any,
         collection_name: str,
@@ -44,10 +51,13 @@ class MongoDBHelper:
         if collection_name not in db.list_collection_names():
             collection = db[collection_name]
             lg.warning(f"creating {collection_name=}")
-            db.create_collection(
-                collection_name,
-                timeseries=timeseries,
-            )
+            if timeseries:
+                db.create_collection(
+                    collection_name,
+                    timeseries=timeseries,
+                )
+            else:
+                db.create_collection(collection_name)
         collection = db.get_collection(collection_name)
         lg.debug(f"connected to {collection_name=}")
         return collection
@@ -90,15 +100,15 @@ class MongoDBHelper:
             # The ismaster command is cheap and does not require auth.
             self.client.admin.command("ismaster")  # Verifies connection
             self.db = self.client[self.database_name]  # type: ignore
-            self.collection = self.connect_to_apple_gmail_collections(
+            self.collection = self.get_or_create_collections(
                 db=self.db,
                 collection_name=self.collection_name,  # type: ignore
+                timeseries=self.timeseries,
             )
-            lg.info("successfully connected to MongoDB.")
-            lg.info("connection parameters:")
-            lg.info(f"connected to {self.mongo_uri=}")
-            lg.info(f"connected to {self.database_name=}")
-            lg.info(f"connected to {self.collection_name=}")
+            lg.debug(f"connected to {self.mongo_uri=}")
+            lg.debug(f"connected to {self.database_name=}, {self.collection_name=}")
+            lg.debug("successfully connected to MongoDB.")
+
             return self
         except ConnectionFailure as e:
             lg.error(f"Connection failed: {e}")
@@ -151,3 +161,11 @@ class MongoDBHelper:
         query = {}
         documents = self.collection.find(query)
         return list(documents)
+
+    def get_email_by_hash(self, email_record_hash: str) -> ReturnDocument | None:
+        if self.collection is None:
+            lg.error("collection is not initialized.")
+            return None
+        query = {"metadata.email_record_hash": email_record_hash}
+        doc = self.collection.find_one(query)
+        return doc

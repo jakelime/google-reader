@@ -90,15 +90,15 @@ class EmailClient:
             messages = response.get("messages", [])
             if not messages:
                 raise NoEmailFound("No emails found matching the criteria.")
-            lg.info(f"retrieved {len(messages)} messages")
 
             for i, message in enumerate(messages, 1):
                 em = self.get_message(message_id=message["id"], user_id=user_id)
                 self.emails.append(em)
-                lg.info(f"parsed email #{i} - {em.rcv_date}")
+                lg.info(f" >> get email #{i} - {em.rcv_date}")
                 if limit:
                     if i >= limit:
                         break
+            lg.info(f"retrieved {len(messages)} emails/messages.")
             return self.emails
 
         except Exception as error:
@@ -258,7 +258,6 @@ class AppleEmailClient(EmailClient):
         metadata["subject"] = subject
         metadata["sender"] = sender
         metadata["rcv_date"] = rcv_date
-        lg.info(f"metadata: {metadata=}")
 
         # TODO: send raw to MongoDB is done
         # 1. parse, send to raw collection
